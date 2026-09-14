@@ -1,0 +1,25 @@
+#!/bin/bash
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tap_name="gw31415/tap"
+
+if ! command -v brew >/dev/null 2>&1; then
+  echo "error: Homebrew is required (https://brew.sh)" >&2
+  exit 1
+fi
+
+cd "${repo_root}"
+
+brew style Casks Formula
+
+if brew tap | grep -Fxq "${tap_name}"; then
+  brew readall --aliases --os=all --arch=all "${tap_name}"
+  brew audit --except=installed --tap="${tap_name}"
+else
+  echo
+  echo "Syntax/style checks passed."
+  echo "For full checks, register this checkout once and run again:"
+  echo "  brew tap ${tap_name} \"${repo_root}\""
+fi
