@@ -1,6 +1,6 @@
 cask "dopa" do
-  version "0.3.2"
-  sha256 "f7484a6489506801c57560660c4757b2332909c8b47ae9526de6c471f4e7e005"
+  version "0.3.3"
+  sha256 "59a481b7deca8b09cc19e26de24c2e4e2c9f90455d329f7ec65436eb1002b7d9"
 
   url "https://github.com/gw31415/dopa/releases/download/v#{version}/Dopa-macos-arm64.zip"
   name "Dopa"
