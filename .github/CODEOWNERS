@@ -1,0 +1,5 @@
+# Keep package definitions and federation policy under repository-owner review.
+/Casks/** @gw31415
+/Formula/** @gw31415
+/.github/chainguard/** @gw31415
+/.github/CODEOWNERS @gw31415

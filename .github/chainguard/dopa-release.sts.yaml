@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
+
+issuer: https://token.actions.githubusercontent.com
+audience: octo-sts.dev
+subject: repo:gw31415@24710985/dopa@1366535207:environment:homebrew-release
+
+# Limit federation to the public dopa release workflow and stable SemVer tags.
+claim_pattern:
+  repository: '^gw31415/dopa$'
+  repository_id: '^1366535207$'
+  repository_owner: '^gw31415$'
+  repository_owner_id: '^24710985$'
+  repository_visibility: '^public$'
+  event_name: '^release$'
+  ref: '^refs/tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+  ref_type: '^tag$'
+  runner_environment: '^github-hosted$'
+  environment: '^homebrew-release$'
+  workflow_ref: '^gw31415/dopa/\.github/workflows/release\.yml@refs/(heads/main|tags/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))$'
+
+permissions:
+  contents: write
+  pull_requests: write
+  statuses: write
