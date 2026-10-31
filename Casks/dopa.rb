@@ -1,6 +1,6 @@
 cask "dopa" do
-  version "0.3.3"
-  sha256 "59a481b7deca8b09cc19e26de24c2e4e2c9f90455d329f7ec65436eb1002b7d9"
+  version "0.3.5"
+  sha256 "2f2a1baff5c96e117a008d21b4915598fb9185a3d6ce577b865d4c31c423cb47"
 
   url "https://github.com/gw31415/dopa/releases/download/v#{version}/Dopa-macos-arm64.zip"
   name "Dopa"
@@ -15,10 +15,10 @@ cask "dopa" do
   binary "#{appdir}/Dopa.app/Contents/Helpers/dopa-daemon"
   bash_completion "#{appdir}/Dopa.app/Contents/Resources/completions/dopa.bash", target: "dopa"
   bash_completion "#{appdir}/Dopa.app/Contents/Resources/completions/dopa-daemon.bash", target: "dopa-daemon"
-  fish_completion "#{appdir}/Dopa.app/Contents/Resources/completions/dopa.fish"
-  fish_completion "#{appdir}/Dopa.app/Contents/Resources/completions/dopa-daemon.fish"
   zsh_completion "#{appdir}/Dopa.app/Contents/Resources/completions/dopa.zsh", target: "_dopa"
   zsh_completion "#{appdir}/Dopa.app/Contents/Resources/completions/dopa-daemon.zsh", target: "_dopa-daemon"
+  fish_completion "#{appdir}/Dopa.app/Contents/Resources/completions/dopa.fish"
+  fish_completion "#{appdir}/Dopa.app/Contents/Resources/completions/dopa-daemon.fish"
 
   caveats <<~EOS
     Dopa is ad-hoc signed without a Developer ID and is not notarized by Apple.
