@@ -4,11 +4,12 @@ cask "ng" do
 
   url "https://github.com/gw31415/ng/releases/download/nightly/ng-macos-arm64.zip"
   name "ng"
-  desc "Neovim GUI client (unofficial macOS nightly build)"
+  desc "Neovim GUI client (unofficial nightly build)"
   homepage "https://github.com/gw31415/ng"
 
   depends_on arch: :arm64
-  depends_on formula: ["fontconfig", "freetype", "neovim", "sdl3"]
+  depends_on formula: %w[fontconfig freetype neovim sdl3]
+  depends_on :macos
 
   app "ng.app"
 
