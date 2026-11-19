@@ -131,12 +131,24 @@ jobs:
           fi
           security import "${RUNNER_TEMP}/cert.p12" -k "${kc}" -P "${CERT_PASSWORD}" -T /usr/bin/codesign
           rm -f "${RUNNER_TEMP}/cert.p12"
+          # The runner trusts Apple's root but lacks the Developer ID G2 intermediate,
+          # without which the identity is not valid and codesign cannot build the chain.
+          for ca in DeveloperIDG2CA:f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a; do
+            curl -fsSL -o "${RUNNER_TEMP}/${ca%%:*}.cer" "https://www.apple.com/certificateauthority/${ca%%:*}.cer"
+            [[ "$(shasum -a 256 "${RUNNER_TEMP}/${ca%%:*}.cer" | cut -d' ' -f1)" == "${ca#*:}" ]] \
+              || { echo "::error::Unexpected ${ca%%:*}.cer from apple.com"; exit 1; }
+            security import "${RUNNER_TEMP}/${ca%%:*}.cer" -k "${kc}"
+          done
           security set-key-partition-list -S apple-tool:,apple: -s -k "${pw}" "${kc}" >/dev/null
           # shellcheck disable=SC2046
           security list-keychains -d user -s "${kc}" $(security list-keychains -d user | tr -d '"')
           identity=$(security find-identity -v -p codesigning "${kc}" \
             | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -1)
-          [[ -n "${identity}" ]] || { echo "::error::No Developer ID Application identity"; exit 1; }
+          [[ -n "${identity}" ]] || {
+            security find-identity -p codesigning "${kc}"
+            echo "::error::No valid Developer ID Application identity"
+            exit 1
+          }
 
           # Inner code first, then the bundle (no --deep). An inner path gets
           # entitlements from notarize/<app>/<file name>.entitlements if present.
@@ -157,17 +169,25 @@ jobs:
           notary=(--key "${RUNNER_TEMP}/notary.p8" --key-id "${NOTARY_KEY_ID}" --issuer "${NOTARY_ISSUER_ID}")
           xcrun notarytool submit notarize.zip "${notary[@]}" --wait --timeout 1h \
             --output-format json >notary.json || true
-          id=$(plutil -extract id raw notary.json)
-          status=$(plutil -extract status raw notary.json)
+          id=$(plutil -extract id raw notary.json 2>/dev/null || true)
+          status=$(plutil -extract status raw notary.json 2>/dev/null || true)
           if [[ "${status}" != Accepted ]]; then
-            xcrun notarytool log "${id}" "${notary[@]}" || true
-            echo "::error::Notarization ${id} ended with status ${status}"
+            cat notary.json
+            [[ -z "${id}" ]] || xcrun notarytool log "${id}" "${notary[@]}" || true
+            echo "::error::Notarization ${id:-(not submitted)} ended with status ${status:-unknown}"
             exit 1
           fi
           xcrun stapler staple "${app}"
           xcrun stapler validate "${app}"
-          spctl --assess --type execute -vv "${app}" 2>&1 | tee spctl.txt
-          grep -Fq 'source=Notarized Developer ID' spctl.txt
+          codesign -dvv "${app}" 2>&1 | grep -F 'Authority=Developer ID Application:'
+          # Some runner images turn Gatekeeper's assessments off; then spctl
+          # accepts everything and names no source, so only check it when on.
+          if spctl --status | grep -q 'assessments enabled'; then
+            spctl --assess --type execute -vv "${app}" 2>&1 | tee spctl.txt
+            grep -Fq 'source=Notarized Developer ID' spctl.txt
+          else
+            echo "::warning::Gatekeeper is off on this runner; relying on notarytool and stapler"
+          fi
           ditto -c -k --keepParent "${app}" "out/${bundle}.zip"
 
       - name: Remove the signing material
