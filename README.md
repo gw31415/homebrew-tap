@@ -81,7 +81,7 @@ brew install gw31415/tap/<formula>
 検証に成功すると、このリポジトリの `Casks/dopa.rb` を更新する Pull Request が
 自動作成されます。
 
-Cask の検証やリリース処理のために、この Tap で GitHub Actions は実行しません。
+Cask の検証のために、この Tap で GitHub Actions は実行しません（この Tap で動くのは、下の「署名と公証」の workflow だけです）。
 Pull Request ではバージョン、公式の
 配布 URL、変更範囲を確認し、問題がなければ人間が承認します。auto-merge が予約済みのため、
 必須条件がそろうと自動で merge されます。SHA-256 は
@@ -99,7 +99,7 @@ repository 所有者の admin bypass は初回設定と手動保守のためだ�
 ## 署名と公証
 
 Developer ID 証明書と公証用の App Store Connect API キーは、この Tap の environment
-`apple-signing` にだけ置きます。各アプリの release workflow は再利用 workflow
+`apple-signing` にだけ置きます。各アプリ（`ng`、`dopa`）の release workflow は再利用 workflow
 `.github/workflows/sign.yml` を呼びます。`sign.yml` は octo-sts で得た短命トークン
 （`.github/chainguard/<app>-notarize.sts.yaml`、`actions: write` のみ）を使い、この Tap の
 `notarize.yml` を起動します。
@@ -108,7 +108,7 @@ Developer ID 証明書と公証用の App Store Connect API キーは、この T
 workflow、イベント、ref）に合うことを確かめてから、その run の未署名 `.app` を受け取り
 （読み取り用のトークンは、アプリ側の `.github/chainguard/homebrew-tap-notarize.sts.yaml`
 が octo-sts で許可します）、
-profile が指す順に署名し、公証して staple します。条件に合わない依頼は、秘密情報を
+profile が指す順に署名し、公証して staple します。macOS で動くのは署名・提出と staple だけで、Apple の審査待ちは Ubuntu で行います。条件に合わない依頼は、秘密情報を
 読み込む前に失敗します。この Tap でアプリのコードは実行しません。
 
 ## License
