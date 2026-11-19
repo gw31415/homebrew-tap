@@ -5,7 +5,8 @@ run-name: notarize ${{ inputs.app }} ${{ inputs.request }}
 # (environment apple-signing). An app's release workflow starts this through
 # the reusable sign.yml; this run fetches the app's unsigned .app from that
 # run, signs it as notarize/<app>/profile.sh says, notarizes and staples it,
-# and leaves it as the artifact "signed" for sign.yml to take back.
+# and leaves it as the artifact "signed" for sign.yml to take back. Only
+# signing and stapling use macOS; the wait for Apple runs on Linux.
 #
 # Only runs listed in a profile (repository, workflow file, event, ref) are
 # signed; every other request fails before any secret is loaded.
@@ -86,6 +87,8 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with: { name: unsigned, path: unsigned.zip }
 
+  # macOS only signs and submits; Apple's review (often minutes, sometimes an
+  # hour or more for a new team) is waited for on Linux in the job "wait".
   sign:
     needs: fetch
     runs-on: macos-26
@@ -94,6 +97,8 @@ jobs:
       contents: read
     env:
       APP: ${{ inputs.app }}
+    outputs:
+      submission: ${{ steps.s.outputs.submission }}
     steps:
       # The tap's own checkout: profiles and entitlements. No app code runs here.
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -101,7 +106,8 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with: { name: unsigned, path: in }
 
-      - name: Sign, notarize and staple
+      - name: Sign and submit for notarization
+        id: s
         env:
           CERT_P12: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
           CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
@@ -165,20 +171,76 @@ jobs:
           "${sign[@]}" "${app}"
           codesign --verify --strict --deep -vv "${app}"
 
-          ditto -c -k --keepParent "${app}" notarize.zip
-          notary=(--key "${RUNNER_TEMP}/notary.p8" --key-id "${NOTARY_KEY_ID}" --issuer "${NOTARY_ISSUER_ID}")
-          xcrun notarytool submit notarize.zip "${notary[@]}" --wait --timeout 1h \
-            --output-format json >notary.json || true
-          id=$(plutil -extract id raw notary.json 2>/dev/null || true)
-          status=$(plutil -extract status raw notary.json 2>/dev/null || true)
-          if [[ "${status}" != Accepted ]]; then
-            cat notary.json
-            [[ -z "${id}" ]] || xcrun notarytool log "${id}" "${notary[@]}" || true
-            echo "::error::Notarization ${id:-(not submitted)} ended with status ${status:-unknown}"
-            exit 1
+          codesign -dvv "${app}" 2>&1 | grep -F 'Authority=Developer ID Application:'
+
+          mkdir submit && ditto -c -k --keepParent "${app}" "submit/${bundle}.zip"
+          xcrun notarytool submit "submit/${bundle}.zip" --no-wait --output-format json \
+            --key "${RUNNER_TEMP}/notary.p8" --key-id "${NOTARY_KEY_ID}" --issuer "${NOTARY_ISSUER_ID}" \
+            | tee notary.json
+          id=$(plutil -extract id raw notary.json)
+          [[ "${id}" =~ ^[0-9a-f-]+$ ]] || { echo "::error::notarytool returned no submission id"; exit 1; }
+          echo "Notarization submission ${id}" >>"${GITHUB_STEP_SUMMARY}"
+          echo "submission=${id}" >>"${GITHUB_OUTPUT}"
+
+      - name: Remove the signing material
+        if: always()
+        run: |
+          security delete-keychain "${RUNNER_TEMP}/signing.keychain-db" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/notary.p8"
+
+      # The exact bytes that were submitted: the ticket matches their code hashes.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with: { name: submitted, path: submit/ }
+
+  wait:
+    needs: sign
+    runs-on: ubuntu-latest
+    environment: apple-signing
+    timeout-minutes: 345
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { persist-credentials: false }
+      - name: Wait for Apple's notarization
+        env:
+          SUBMISSION_ID: ${{ needs.sign.outputs.submission }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          export NOTARY_KEY_FILE="${RUNNER_TEMP}/notary.p8"
+          trap 'rm -f "${NOTARY_KEY_FILE}"' EXIT
+          if [[ "${NOTARY_KEY}" == -----BEGIN* ]]; then
+            (umask 077 && printf '%s\n' "${NOTARY_KEY}" >"${NOTARY_KEY_FILE}")
+          else
+            (umask 077 && base64 --decode <<<"${NOTARY_KEY}" >"${NOTARY_KEY_FILE}")
           fi
+          NOTARY_WAIT_HOURS=5.5 python3 -I notarize/wait.py
+
+  # Stapling needs no secret: it fetches the ticket Apple just issued.
+  staple:
+    needs: wait
+    runs-on: macos-26
+    permissions: {}
+    env:
+      APP: ${{ inputs.app }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { persist-credentials: false, path: tap }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: submitted, path: in }
+      - name: Staple and check
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source "tap/notarize/${APP}/profile.sh" # bundle
+          mkdir work out && ditto -x -k "in/${bundle}.zip" work
+          app="work/${bundle}"
           xcrun stapler staple "${app}"
           xcrun stapler validate "${app}"
+          codesign --verify --strict --deep -vv "${app}"
           codesign -dvv "${app}" 2>&1 | grep -F 'Authority=Developer ID Application:'
           # Some runner images turn Gatekeeper's assessments off; then spctl
           # accepts everything and names no source, so only check it when on.
@@ -186,15 +248,9 @@ jobs:
             spctl --assess --type execute -vv "${app}" 2>&1 | tee spctl.txt
             grep -Fq 'source=Notarized Developer ID' spctl.txt
           else
-            echo "::warning::Gatekeeper is off on this runner; relying on notarytool and stapler"
+            echo "::warning::Gatekeeper is off on this runner; relying on Apple's status and stapler"
           fi
           ditto -c -k --keepParent "${app}" "out/${bundle}.zip"
-
-      - name: Remove the signing material
-        if: always()
-        run: |
-          security delete-keychain "${RUNNER_TEMP}/signing.keychain-db" 2>/dev/null || true
-          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/notary.p8"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with: { name: signed, path: out/ }
