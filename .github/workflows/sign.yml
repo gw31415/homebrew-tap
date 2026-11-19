@@ -14,7 +14,8 @@ name: sign # reusable: an app's release workflow calls this to get its .app sign
 #
 # This runs in the caller's repository and holds no Apple secret. It gets a
 # short-lived token for the tap from octo-sts (identity <app>-notarize, see
-# .github/chainguard/), starts notarize.yml here and waits for it.
+# .github/chainguard/), renewed while it waits, starts notarize.yml here and
+# waits for it.
 
 on:
   workflow_call:
@@ -27,24 +28,33 @@ permissions: {}
 jobs:
   sign:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     permissions:
       id-token: write
     steps:
-      - id: sts
-        uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # v1.1.1
-        with:
-          scope: gw31415/homebrew-tap
-          identity: ${{ inputs.app }}-notarize
-
       - name: Ask the tap to sign and notarize, then wait
         shell: bash
         env:
-          GH_TOKEN: ${{ steps.sts.outputs.token }}
           APP: ${{ inputs.app }}
           ARTIFACT: ${{ inputs.artifact }}
         run: |
           set -euo pipefail
           tap=gw31415/homebrew-tap
+          # The octo-sts exchange (what octo-sts/action does), done here so the
+          # token can be renewed: it lasts an hour, and Apple may take longer.
+          renew() {
+            local oidc
+            oidc=$(curl -fsS --retry 3 --retry-all-errors -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=octo-sts.dev" | jq -r .value)
+            GH_TOKEN=$(curl -fsS --retry 3 --retry-all-errors -H "Authorization: Bearer ${oidc}" \
+              "https://octo-sts.dev/sts/exchange?scope=${tap}&identity=${APP}-notarize" | jq -r .token)
+            [[ -n "${GH_TOKEN}" && "${GH_TOKEN}" != null ]] || { echo "::error::octo-sts gave no token"; return 1; }
+            echo "::add-mask::${GH_TOKEN}"
+            export GH_TOKEN
+            renewed=${SECONDS}
+          }
+          renew
+
           request="${GITHUB_REPOSITORY//\//-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           # gh prints the new run's URL; take the run id from it.
           url=$(gh workflow run notarize.yml --repo "${tap}" --ref main \
@@ -52,8 +62,17 @@ jobs:
             | grep -Eo "https://github.com/${tap}/actions/runs/[0-9]+" | tail -1)
           id=${url##*/}
           [[ -n "${id}" ]] || { echo "::error::notarize.yml did not start"; exit 1; }
-          echo "Notarization run: ${GITHUB_SERVER_URL}/${tap}/actions/runs/${id}" >>"${GITHUB_STEP_SUMMARY}"
-          gh run watch "${id}" --repo "${tap}" --exit-status --interval 30 >/dev/null
+          echo "Notarization run: ${url}" >>"${GITHUB_STEP_SUMMARY}"
+          echo "Waiting for ${url}"
+
+          while :; do
+            (( SECONDS - renewed < 2700 )) || renew
+            state=$(gh api "repos/${tap}/actions/runs/${id}" --jq '"\(.status) \(.conclusion)"' || echo "unknown -")
+            [[ "${state}" == completed* ]] && break
+            sleep 60
+          done
+          [[ "${state}" == "completed success" ]] || { echo "::error::${url} ended: ${state}"; exit 1; }
+          renew
           gh run download "${id}" --repo "${tap}" --name signed --dir signed
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
