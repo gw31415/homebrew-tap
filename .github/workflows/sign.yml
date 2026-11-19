@@ -46,16 +46,11 @@ jobs:
           set -euo pipefail
           tap=gw31415/homebrew-tap
           request="${GITHUB_REPOSITORY//\//-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          gh workflow run notarize.yml --repo "${tap}" --ref main \
-            -f app="${APP}" -f run-id="${GITHUB_RUN_ID}" -f artifact="${ARTIFACT}" -f request="${request}"
-          id=
-          for _ in {1..30}; do
-            id=$(gh run list --repo "${tap}" --workflow notarize.yml --event workflow_dispatch --limit 50 \
-              --json databaseId,displayTitle \
-              --jq "map(select(.displayTitle == \"notarize ${APP} ${request}\"))[0].databaseId // empty")
-            [[ -n "${id}" ]] && break
-            sleep 5
-          done
+          # gh prints the new run's URL; take the run id from it.
+          url=$(gh workflow run notarize.yml --repo "${tap}" --ref main \
+            -f app="${APP}" -f run-id="${GITHUB_RUN_ID}" -f artifact="${ARTIFACT}" -f request="${request}" 2>&1 \
+            | grep -Eo "https://github.com/${tap}/actions/runs/[0-9]+" | tail -1)
+          id=${url##*/}
           [[ -n "${id}" ]] || { echo "::error::notarize.yml did not start"; exit 1; }
           echo "Notarization run: ${GITHUB_SERVER_URL}/${tap}/actions/runs/${id}" >>"${GITHUB_STEP_SUMMARY}"
           gh run watch "${id}" --repo "${tap}" --exit-status --interval 30 >/dev/null
