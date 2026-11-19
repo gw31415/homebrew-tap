@@ -81,7 +81,8 @@ brew install gw31415/tap/<formula>
 検証に成功すると、このリポジトリの `Casks/dopa.rb` を更新する Pull Request が
 自動作成されます。
 
-この Tap では GitHub Actions を実行しません。Pull Request ではバージョン、公式の
+Cask の検証やリリース処理のために、この Tap で GitHub Actions は実行しません。
+Pull Request ではバージョン、公式の
 配布 URL、変更範囲を確認し、問題がなければ人間が承認します。auto-merge が予約済みのため、
 必須条件がそろうと自動で merge されます。SHA-256 は
 Dopa 側の workflow で検証済みの値が使われるため、手元で再計算する必要はありません。
@@ -90,6 +91,25 @@ Dopa 側の workflow で検証済みの値が使われるため、手元で再�
 Homebrew の構文・style チェックです。Tap の自動チェックやリリース処理ではありません。
 repository 所有者の admin bypass は初回設定と手動保守のためだけに残し、通常の Dopa
 リリースでは使用しません。
+
+`ng` は [`gw31415/ng`](https://github.com/gw31415/ng)（Shougo/ng の非公式 macOS 版）の
+ローリングリリース（`nightly`）を配布します。`Casks/ng.rb` は `version :latest` で固定なので、
+リリースのたびの更新はありません。更新するには `brew upgrade --cask --greedy-latest ng` を実行します。
+
+## 署名と公証
+
+Developer ID 証明書と公証用の App Store Connect API キーは、この Tap の environment
+`apple-signing` にだけ置きます。各アプリの release workflow は再利用 workflow
+`.github/workflows/sign.yml` を呼びます。`sign.yml` は octo-sts で得た短命トークン
+（`.github/chainguard/<app>-notarize.sts.yaml`、`actions: write` のみ）を使い、この Tap の
+`notarize.yml` を起動します。
+
+`notarize.yml` は、依頼元の run が `notarize/<app>/profile.sh` の条件（リポジトリ、
+workflow、イベント、ref）に合うことを確かめてから、その run の未署名 `.app` を受け取り
+（読み取り用のトークンは、アプリ側の `.github/chainguard/homebrew-tap-notarize.sts.yaml`
+が octo-sts で許可します）、
+profile が指す順に署名し、公証して staple します。条件に合わない依頼は、秘密情報を
+読み込む前に失敗します。この Tap でアプリのコードは実行しません。
 
 ## License
 

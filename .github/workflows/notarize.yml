@@ -1,0 +1,180 @@
+name: notarize
+run-name: notarize ${{ inputs.app }} ${{ inputs.request }}
+
+# The one place that holds the Developer ID certificate and the notary key
+# (environment apple-signing). An app's release workflow starts this through
+# the reusable sign.yml; this run fetches the app's unsigned .app from that
+# run, signs it as notarize/<app>/profile.sh says, notarizes and staples it,
+# and leaves it as the artifact "signed" for sign.yml to take back.
+#
+# Only runs listed in a profile (repository, workflow file, event, ref) are
+# signed; every other request fails before any secret is loaded.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app: { description: Profile name under notarize/, required: true }
+      run-id: { description: The requesting workflow run, required: true }
+      artifact: { description: "Artifact in that run: one zip of the unsigned .app", required: true }
+      request: { description: Unique id chosen by sign.yml, required: true }
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      APP: ${{ inputs.app }}
+      RUN_ID: ${{ inputs.run-id }}
+      ARTIFACT: ${{ inputs.artifact }}
+      REQUEST: ${{ inputs.request }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { persist-credentials: false }
+
+      - name: Read the profile
+        id: p
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == refs/heads/main ]]
+          [[ "${APP}" =~ ^[a-z0-9-]+$ && -f "notarize/${APP}/profile.sh" ]]
+          [[ "${RUN_ID}" =~ ^[0-9]+$ && "${ARTIFACT}" =~ ^[A-Za-z0-9._-]+$ && "${REQUEST}" =~ ^[A-Za-z0-9._-]+$ ]]
+          # shellcheck source=/dev/null
+          source "notarize/${APP}/profile.sh"
+          echo "repo=${repo}" >>"${GITHUB_OUTPUT}"
+
+      # GITHUB_TOKEN cannot read another repository's artifacts, even a public
+      # one; the app repository grants this workflow actions: read through its
+      # own .github/chainguard/homebrew-tap-notarize.sts.yaml.
+      - id: sts
+        uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # v1.1.1
+        with:
+          scope: ${{ steps.p.outputs.repo }}
+          identity: homebrew-tap-notarize
+
+      - name: Check the request and fetch the unsigned app
+        env:
+          GH_TOKEN: ${{ steps.sts.outputs.token }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          source "notarize/${APP}/profile.sh"
+
+          gh api "repos/${repo}/actions/runs/${RUN_ID}" >run.json
+          jq -e --arg repo "${repo}" --arg wf "${workflow}" --arg ev "${events}" --arg ref "${refs}" '
+            .repository.full_name == $repo and .head_repository.full_name == $repo
+            and .path == $wf and .status == "in_progress"
+            and (.event | test($ev)) and (.head_branch | test($ref))' run.json >/dev/null || {
+            echo "::error::Run ${RUN_ID} is not an allowed ${APP} release run"
+            jq '{repository: .repository.full_name, head_repository: .head_repository.full_name, path, status, event, head_branch}' run.json
+            exit 1
+          }
+          echo "Signing ${APP} for $(jq -r .html_url run.json)" >>"${GITHUB_STEP_SUMMARY}"
+
+          gh run download "${RUN_ID}" --repo "${repo}" --name "${ARTIFACT}" --dir in
+          zips=(in/*.zip)
+          [[ ${#zips[@]} == 1 && -f "${zips[0]}" ]] || { echo "::error::Expected one zip in ${ARTIFACT}"; exit 1; }
+          mv "${zips[0]}" unsigned.zip
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with: { name: unsigned, path: unsigned.zip }
+
+  sign:
+    needs: fetch
+    runs-on: macos-26
+    environment: apple-signing
+    permissions:
+      contents: read
+    env:
+      APP: ${{ inputs.app }}
+    steps:
+      # The tap's own checkout: profiles and entitlements. No app code runs here.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: { persist-credentials: false, path: tap }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: { name: unsigned, path: in }
+
+      - name: Sign, notarize and staple
+        env:
+          CERT_P12: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          profile="tap/notarize/${APP}"
+          # shellcheck source=/dev/null
+          source "${profile}/profile.sh" # bundle, inner
+          mkdir work out && ditto -x -k in/unsigned.zip work
+          app="work/${bundle}"
+          [[ -d "${app}" && ! -L "${app}" ]] || { echo "::error::${bundle} is not in the zip"; exit 1; }
+
+          kc="${RUNNER_TEMP}/signing.keychain-db"
+          pw=$(uuidgen)
+          security create-keychain -p "${pw}" "${kc}"
+          security set-keychain-settings -lut 3600 "${kc}"
+          security unlock-keychain -p "${pw}" "${kc}"
+          (umask 077 && base64 --decode <<<"${CERT_P12}" >"${RUNNER_TEMP}/cert.p12")
+          # NOTARY_KEY_P8 may hold the .p8 as is (-----BEGIN PRIVATE KEY-----) or in base64.
+          if [[ "${NOTARY_KEY}" == -----BEGIN* ]]; then
+            (umask 077 && printf '%s\n' "${NOTARY_KEY}" >"${RUNNER_TEMP}/notary.p8")
+          else
+            (umask 077 && base64 --decode <<<"${NOTARY_KEY}" >"${RUNNER_TEMP}/notary.p8")
+          fi
+          security import "${RUNNER_TEMP}/cert.p12" -k "${kc}" -P "${CERT_PASSWORD}" -T /usr/bin/codesign
+          rm -f "${RUNNER_TEMP}/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${pw}" "${kc}" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "${kc}" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "${kc}" \
+            | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -1)
+          [[ -n "${identity}" ]] || { echo "::error::No Developer ID Application identity"; exit 1; }
+
+          # Inner code first, then the bundle (no --deep). An inner path gets
+          # entitlements from notarize/<app>/<file name>.entitlements if present.
+          sign=(codesign --force --timestamp --options runtime --sign "${identity}")
+          for path in "${inner[@]}"; do
+            [[ -f "${app}/${path}" && ! -L "${app}/${path}" ]] || { echo "::error::Missing ${path}"; exit 1; }
+            ent="${profile}/${path##*/}.entitlements"
+            if [[ -f "${ent}" ]]; then
+              "${sign[@]}" --entitlements "${ent}" "${app}/${path}"
+            else
+              "${sign[@]}" "${app}/${path}"
+            fi
+          done
+          "${sign[@]}" "${app}"
+          codesign --verify --strict --deep -vv "${app}"
+
+          ditto -c -k --keepParent "${app}" notarize.zip
+          notary=(--key "${RUNNER_TEMP}/notary.p8" --key-id "${NOTARY_KEY_ID}" --issuer "${NOTARY_ISSUER_ID}")
+          xcrun notarytool submit notarize.zip "${notary[@]}" --wait --timeout 1h \
+            --output-format json >notary.json || true
+          id=$(plutil -extract id raw notary.json)
+          status=$(plutil -extract status raw notary.json)
+          if [[ "${status}" != Accepted ]]; then
+            xcrun notarytool log "${id}" "${notary[@]}" || true
+            echo "::error::Notarization ${id} ended with status ${status}"
+            exit 1
+          fi
+          xcrun stapler staple "${app}"
+          xcrun stapler validate "${app}"
+          spctl --assess --type execute -vv "${app}" 2>&1 | tee spctl.txt
+          grep -Fq 'source=Notarized Developer ID' spctl.txt
+          ditto -c -k --keepParent "${app}" "out/${bundle}.zip"
+
+      - name: Remove the signing material
+        if: always()
+        run: |
+          security delete-keychain "${RUNNER_TEMP}/signing.keychain-db" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/notary.p8"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with: { name: signed, path: out/ }
